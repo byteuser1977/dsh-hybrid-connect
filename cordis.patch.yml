@@ -1,0 +1,7 @@
+# Register the hybrid provider alongside (not replacing) the existing Trae
+# providers. dsh-trae-connect still owns the `trae` and `trae-intl` groups;
+# this plugin only adds the routing layer that also lets those groups serve
+# local-model requests.
+- insert:
+    - id: llm-hybrid
+      name: dsh-hybrid-connect
