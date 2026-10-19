@@ -701,8 +701,17 @@ export async function* streamChat(token, model, messages, signal, options = {}, 
 						emittedAny = true;
 						contents.set(id, content);
 					} else if (content !== previous && !content.startsWith(previous)) {
-						yield { type: "text", text: content };
-						emittedAny = true;
+						// P10 FIX (dsh-hybrid-connect): the upstream occasionally
+						// re-sends an entire plan snapshot under a NEW id (the plan
+						// item was re-created mid-stream), or a non-prefix snapshot
+						// of the SAME id. The old code re-emitted the whole content
+						// verbatim here, duplicating text the answer stream already
+						// delivered once. We cannot re-emit — we do not know which
+						// part (if any) is new — so we keep the store in sync for
+						// future incremental frames and emit nothing. When the
+						// answer text IS the authoritative copy, the reset frame at
+						// the end of the turn (or the plain `message` event, which
+						// uses its own `__msg__` key) carries the definitive text.
 						contents.set(id, content);
 					}
 				}

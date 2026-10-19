@@ -19,6 +19,9 @@
     "local-model"
   ],
   "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

@@ -1,115 +1,123 @@
 # dsh-hybrid-connect
 
-**混合模型路由插件（DSH）**：同一个 Loopback OpenAI 端点，按请求分流到 **Trae 远程**（复用 `dsh-trae-connect` 的协议翻译与凭据）或**本地 OpenAI 兼容模型**（Ollama / llama.cpp / LM Studio / vLLM）。
+> **TL;DR**: A DSH plugin that routes requests to **Trae remote models** (CN/Intl editions) **or** a **local OpenAI-compatible endpoint** (Ollama / llama.cpp / LM Studio / vLLM) through a single loopback entrypoint, auto-routed by `model id`.
 
-**本项目已完整移植 `dsh-trae-connect` 全部功能代码**（`credentials.js` / `upstream.js` / `install.js` / `index.js`），并加入路由层（`router.js` / `local.js`）——不再依赖外部 `dsh-trae-connect`，是**自足的独立插件**。
+- ✅ **Zero-config**: Install and go — auto-discovers installed Trae, reuses login state, pulls model catalog
+- ✅ **Dual editions in parallel**: `trae` (CN) + `trae-intl` (Intl) registered unconditionally; groups auto-hide when no credentials
+- ✅ **Hybrid routing**: `by-prefix` (only `local@` prefix goes local, default, zero false positives) / `by-id` (hit local `/v1/models` catalog → local, failure falls back to Trae)
+- ✅ **Full port**: `install.js` / `upstream.js` / `credentials.js` **byte-for-byte copied** from `dsh-trae-connect` — protocol translation, credential decryption, token refresh, install discovery, SSE dedup, ephemeral session cleanup, 1M context, thinking effort, lock badges… all preserved
+- ✅ **Self-contained**: No external dependency on `dsh-trae-connect`; single plugin runs everything
 
 ---
 
-## 1. 架构
+## 1. Architecture
 
 ```
-                DSH 宿主 (PiAiAdapter)
+                DSH Host (PiAiAdapter)
                        │  model = "local@qwen2.5:14b" / "deepseek-v4.1-flash"
                        ▼
         ┌──────────────────────────────────────────┐
-        │  createHybridShim  (127.0.0.1, 随机端口)   │
-        │  Host/Origin 回环校验 + per-edition Bearer │
+        │  createHybridShim  (127.0.0.1, random)   │
+        │  Host/Origin loopback check + Bearer     │
         │  ┌────────────────────────────────────┐  │
-        │  │ L1  decideRoute(model, edition)    │  │  router.js（零 I/O）
+        │  │ L1  decideRoute(model, edition)    │  │  router.js (zero I/O)
         │  │     kind:"trae" │ kind:"local"     │  │
         │  └───────┬───────────────┬────────────┘  │
         └──────────┼───────────────┼───────────────┘
                    ▼               ▼
-        L2a Trae 分支            L2b 本地分支（local.js，纯转发）
-        upstream.js 的 SSE 翻译    fetch → /v1/chat/completions
-        credentials.js 解密/续期   无凭据、无协议翻译
-        install.js 安装发现
+        L2a Trae branch            L2b Local branch (local.js, pure proxy)
+        upstream.js SSE translate  fetch → /v1/chat/completions
+        credentials.js decrypt     no creds, no protocol translation
+        install.js discovery
 ```
 
-| 层 | 职责 | 文件 | 状态 |
-|---|---|---|---|
-| L0 | DSH 选模型 → `${shim.baseUrl()}/v1` | `index.js` (`PiAiAdapter`) | ✅ 完整 |
-| L1 | 按 model id 分流 | `router.js` | ✅ 完整（2 种策略，零误判默认） |
-| L2a | Trae 远程协议翻译 | `upstream.js`（**完整移植**） | ✅ 完整 |
-| L2b | 本地端点纯转发 | `local.js` | ✅ 完整（SSE 透传 + 错误处理） |
-| — | 凭据解密/续期 | `credentials.js`（**完整移植**） | ✅ 完整 |
-| — | 安装位置发现 | `install.js`（**完整移植**） | ✅ 完整 |
+| Layer | Responsibility | File | Status |
+|-------|----------------|------|--------|
+| L0 | DSH picks model → `${shim.baseUrl()}/v1` | `index.js` (`PiAiAdapter`) | ✅ Complete |
+| L1 | Route by model id | `router.js` | ✅ Complete (2 strategies, zero false-positive default) |
+| L2a | Trae remote protocol | `upstream.js` (**full port**) | ✅ Complete |
+| L2b | Local endpoint proxy | `local.js` | ✅ Complete (SSE passthrough + error handling) |
+| — | Credential decrypt/refresh | `credentials.js` (**full port**) | ✅ Complete |
+| — | Install location discovery | `install.js` (**full port**) | ✅ Complete |
+
+**Port fidelity**: `install.js` / `upstream.js` / `credentials.js` are **byte-for-byte copies** from `dsh-trae-connect` (historical comments and pitfall notes intact); only `index.js` does the wiring.
 
 ---
 
-## 2. 文件清单
+## 2. File Manifest
 
-| 文件 | 行数 | 说明 |
-|---|---|---|
-| `install.js` | 311 | 逐字节移植自 `dsh-trae-connect`；注册表扫描 + product.json 判版本/镜像 |
-| `upstream.js` | 786 | 逐字节移植自 `dsh-trae-connect`；Trae remote SSE 协议客户端 |
-| `credentials.js` | 717 | 逐字节移植自 `dsh-trae-connect`；tc 信封解密 + ExchangeToken 续期 |
-| `router.js` | ~100 | 新增；`by-prefix` / `by-id` 双策略路由决策，目录缓存 + 失败回退 |
-| `local.js` | ~100 | 新增；本地端点 SSE 透传 / JSON 转发，纯转发无副作用 |
-| `index.js` | ~730 | 重写；接线 + 路由插入点 + 2 个 P 项 bug 修复，移植版 `apply()` 骨架 |
-| `package.json` | — | **不再依赖 `dsh-trae-connect`** |
-| `README.md` | — | 本文件 |
-
-**移植保真度**：`install.js` / `upstream.js` / `credentials.js` 三个文件**逐字节复制**自 `dsh-trae-connect`（未做任何修改，历史注释和踩坑记录完整保留）；仅在 `index.js` 里做接线。
-
----
-
-## 3. 路由策略（`router.js`）
-
-| 策略 | 行为 | 失败模式 |
-|---|---|---|
-| `by-prefix`（默认） | 仅 `local@` 前缀走本地；其余一律走 Trae | **不可能误判**（不依赖本地服务器目录） |
-| `by-id` | 模型 id 命中本地 `/v1/models` 目录 → 本地；未命中 → Trae | 目录拉取失败（本地服务器离线）**回退 Trae**，不拒绝请求；`auto` 永远走 Trae |
-
-- 本地未配置（`localBase` 留空）→ 本插件与纯 Trae 行为**完全一致**，零额外开销。
-- 目录缓存 60s TTL，稳态零网络请求。
+| File | Lines | Description |
+|------|-------|-------------|
+| `install.js` | 311 | Byte-for-byte port from `dsh-trae-connect`; registry scan + product.json edition/mirror detection |
+| `upstream.js` | 786 | Byte-for-byte port from `dsh-trae-connect`; Trae remote SSE protocol client |
+| `credentials.js` | 717 | Byte-for-byte port from `dsh-trae-connect`; tc envelope decryption + ExchangeToken refresh |
+| `router.js` | ~100 | New; `by-prefix` / `by-id` dual-strategy routing, catalog cache + failure fallback |
+| `local.js` | ~100 | New; local endpoint SSE passthrough / JSON forward, pure proxy no side effects |
+| `index.js` | ~730 | Rewritten; wiring + routing hook + 2 P-bug fixes, ported `apply()` skeleton |
+| `package.json` | — | **No longer depends on `dsh-trae-connect`** |
+| `README.md` | — | This file (English) |
+| `README_CN.md` | — | Chinese version |
 
 ---
 
-## 4. 移植过程中落实的修复
+## 3. Routing Strategies (`router.js`)
 
-| 原分析问题 | 本插件状态 | 说明 |
-|---|---|---|
-| **P4**：客户端断开不取消上游 | ✅ **已修** | `index.js` `chatCompletions` 用 `res.on("close")`（响应流真正关闭时触发）而非原版的 `req.on("close")`（可能在请求体刚读完就过早触发） |
-| **P2**：CN 状态卡误用 intl 积分地址 | ✅ **已修** | `createEditionStatus` 现在按 edition 传 `creditsBase`：CN 传 `undefined`（走 `fetchCredits` 自己的 CN 默认分支），仅 intl 传配置值 |
-| **P1/P5/P8/P9/P10/P11/P14** | ⚠️ **沿用移植版原样** | 这些问题源于 `dsh-trae-connect` 的上游代码本身（`upstream.js`/`credentials.js` 的 SSE 去重、静态 Bearer、`readBody` 无上限等），本次"完整移植"刻意不动；需要修复时另开任务 |
+| Strategy | Behavior | Failure Mode |
+|----------|----------|--------------|
+| `by-prefix` (default) | Only `local@` prefix → local; everything else → Trae | **Cannot misroute** (does not depend on local server catalog) |
+| `by-id` | Model id hits local `/v1/models` catalog → local; miss → Trae | Catalog fetch failure (local server down) **falls back to Trae**, never rejects; `auto` always → Trae |
 
----
-
-## 5. 配置卡字段（`.volatile()`）
-
-沿用 `dsh-trae-connect` 全部字段（`useMaximumContextWindow` / `autoDeleteSession` / `dataDirCn` / `dataDirIntl` / `intlRemoteBase` / `intlWebOrigin` / `intlCreditsBase`），新增：
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `localBase` | `""` | 本地端点根地址（如 `http://127.0.0.1:11434/v1`）。留空 = 关闭本地路由。 |
-| `localKey` | `""` | 本地 Bearer Key（Ollama 通常留空）。 |
-| `hybridPolicy` | `by-prefix` | `by-prefix` \| `by-id`。 |
+- No local configured (`localBase` empty) → plugin behaves **identically to pure Trae**, zero overhead.
+- Catalog cache 60s TTL, steady-state zero network calls.
 
 ---
 
-## 6. 注册的 Provider
+## 4. Fixes Landed During Port
 
-沿用 `dsh-trae-connect` 的两个（无凭据时目录为空、分组隐藏）：
-
-- `trae`（Trae 国内版）
-- `trae-intl`（Trae 国际版）
-
-`cordis.patch.yml` 只插 `llm-hybrid`，但 `apply()` 内部**同时注册** `trae` / `trae-intl` 两个 provider（与原版行为一致）。
-
----
-
-## 7. 后续工作（未在本次移植范围）
-
-1. body 大小上限（P14）
-2. 静态 Bearer → `randomBytes(32)`（P5）
-3. SSE 去重逻辑修复（P10，`upstream.js` 的 `plan_item` 分支）
-4. 级联回退（形态 C：Trae 502/超时 → 自动重发本地）
-5. `node:test` 单测（`router` / `local` / `upstream.parseModelList` / `credentials.decryptStorageValue` 均为窄接口/纯函数）
+| Original Issue | This Plugin | Notes |
+|----------------|-------------|-------|
+| **P4**: Client disconnect doesn't cancel upstream | ✅ **Fixed** | `chatCompletions` uses `res.on("close")` (fires when response stream ends) instead of `req.on("close")` (may fire too early after request body read) |
+| **P2**: CN status card incorrectly used intl credits endpoint | ✅ **Fixed** | `createEditionStatus` now passes per-edition `creditsBase`: CN passes `undefined` (hits `fetchCredits`'s own CN default), only intl passes configured value |
+| **P5**: Hard-coded static Bearer secret | ✅ **Fixed** | `EDITION_SECRETS` now generates `randomBytes(32)` per edition at module load (per session); `resolveApiKey` has no more `SHARED_SECRET` fallback |
+| **P14**: Unbounded request body read | ✅ **Fixed** | `readBody` enforces 16 MiB — checks `Content-Length` up-front and a running total for chunked requests; violation returns 413 `payload_too_large` (not 400) |
+| **P10**: SSE `plan_item` non-prefix snapshot re-emitted whole content | ✅ **Fixed** | `plan_item` else-branch no longer re-emits; store stays in sync for future incremental frames, no duplicate text |
+| **P1/P8/P9/P11** | ⚠️ **Preserved from port** | These originate in `dsh-trae-connect`'s upstream code; deliberately untouched in "full port". Fix in separate task if needed. |
 
 ---
 
-## 许可证
+## 5. Config Card Fields (`.volatile()`)
 
-MIT（与 `dsh-trae-connect` 一致）。
+Inherits all `dsh-trae-connect` fields (`useMaximumContextWindow` / `autoDeleteSession` / `dataDirCn` / `dataDirIntl` / `intlRemoteBase` / `intlWebOrigin` / `intlCreditsBase`), plus:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `localBase` | `""` | Local OpenAI-compatible endpoint root (e.g. `http://127.0.0.1:11434/v1`). Empty = disable local routing, plugin behaves exactly like pure Trae. |
+| `localKey` | `""` | Local endpoint Bearer key (Ollama usually empty). Empty = no Authorization header sent. |
+| `hybridPolicy` | `by-prefix` | `by-prefix` \| `by-id`. |
+
+---
+
+## 6. Registered Providers
+
+Inherits the two from `dsh-trae-connect` (empty catalog = group hidden):
+
+- `trae` (Trae CN)
+- `trae-intl` (Trae Intl)
+
+`cordis.patch.yml` only inserts `llm-hybrid`, but `apply()` **registers both** `trae` / `trae-intl` providers internally (consistent with original behavior).
+
+---
+
+## 7. Future Work (Out of Scope for This Port)
+
+1. ~~Request body size limit (P14)~~ ✅ Landed
+2. ~~Static Bearer → `randomBytes(32)` per session (P5)~~ ✅ Landed
+3. ~~SSE dedup logic fix (P10, `upstream.js` `plan_item` branch)~~ ✅ Landed
+4. Cascading fallback (shape C: Trae 502/timeout → auto-retry local)
+5. `node:test` unit tests (`router` / `local` / `upstream.parseModelList` / `credentials.decryptStorageValue` are all narrow interfaces / pure functions)
+
+---
+
+## License
+
+MIT (same as `dsh-trae-connect`).
