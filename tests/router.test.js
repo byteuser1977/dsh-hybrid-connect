@@ -121,3 +121,133 @@ describe("router — by-id policy", () => {
 		}
 	});
 });
+
+describe("router — by-id catalog caching", () => {
+	test("successful fetch is reused within the TTL (one fetch across calls)", async () => {
+		let calls = 0;
+		const decider = makeDecider({
+			localBase: () => "http://127.0.0.1:11434/v1",
+			hybridPolicy: () => "by-id",
+		});
+		const orig = globalThis.fetch;
+		globalThis.fetch = async () => {
+			calls++;
+			return { ok: true, json: async () => ({ data: [{ id: "qwen2.5:14b" }] }) };
+		};
+		try {
+			assert.equal((await decider("qwen2.5:14b", "cn")).kind, "local");
+			assert.equal((await decider("qwen2.5:14b", "cn")).kind, "local");
+			assert.equal(calls, 1);
+		} finally {
+			globalThis.fetch = orig;
+		}
+	});
+
+	test("failed fetch enters a cooldown: no re-fetch per request while the local server is down", async () => {
+		let calls = 0;
+		const decider = makeDecider({
+			localBase: () => "http://127.0.0.1:11434/v1",
+			hybridPolicy: () => "by-id",
+		});
+		const orig = globalThis.fetch;
+		globalThis.fetch = async () => {
+			calls++;
+			throw new Error("ECONNREFUSED");
+		};
+		try {
+			// The first request pays one failing probe; every further request
+			// inside the cooldown window must reuse that verdict without
+			// re-probing, or an offline local server stalls the Trae path.
+			assert.deepEqual(await decider("qwen2.5:14b", "cn"), { kind: "trae", model: "qwen2.5:14b" });
+			assert.deepEqual(await decider("qwen2.5:14b", "cn"), { kind: "trae", model: "qwen2.5:14b" });
+			assert.deepEqual(await decider("deepseek-v4.1-flash", "cn"), { kind: "trae", model: "deepseek-v4.1-flash" });
+			assert.equal(calls, 1);
+		} finally {
+			globalThis.fetch = orig;
+		}
+	});
+
+	test("after the cooldown elapses the catalog is probed again", async () => {
+		let calls = 0;
+		const decider = makeDecider({
+			localBase: () => "http://127.0.0.1:11434/v1",
+			hybridPolicy: () => "by-id",
+		});
+		const orig = globalThis.fetch;
+		globalThis.fetch = async () => {
+			calls++;
+			if (calls === 1) throw new Error("ECONNREFUSED");
+			return { ok: true, json: async () => ({ data: [{ id: "qwen2.5:14b" }] }) };
+		};
+		// Start the mocked clock at a realistic epoch so the initial state
+		// (failedAt = 0) cannot read as "inside the cooldown window".
+		mock.timers.enable({ apis: ["Date"], now: 1_759_000_000_000 });
+		try {
+			assert.deepEqual(await decider("qwen2.5:14b", "cn"), { kind: "trae", model: "qwen2.5:14b" });
+			// Still inside the cooldown window: no re-probe.
+			mock.timers.tick(10_000);
+			assert.deepEqual(await decider("qwen2.5:14b", "cn"), { kind: "trae", model: "qwen2.5:14b" });
+			assert.equal(calls, 1);
+			// Cooldown elapsed: probe again, now the server is up.
+			mock.timers.tick(21_000);
+			assert.equal((await decider("qwen2.5:14b", "cn")).kind, "local");
+			assert.equal(calls, 2);
+		} finally {
+			mock.timers.reset();
+			globalThis.fetch = orig;
+		}
+	});
+
+	test("concurrent by-id requests coalesce onto one catalog fetch", async () => {
+		let calls = 0;
+		const decider = makeDecider({
+			localBase: () => "http://127.0.0.1:11434/v1",
+			hybridPolicy: () => "by-id",
+		});
+		const orig = globalThis.fetch;
+		globalThis.fetch = async () => {
+			calls++;
+			await new Promise((r) => setTimeout(r, 20));
+			return { ok: true, json: async () => ({ data: [{ id: "qwen2.5:14b" }] }) };
+		};
+		try {
+			const results = await Promise.all([
+				decider("qwen2.5:14b", "cn"),
+				decider("qwen2.5:14b", "cn"),
+				decider("qwen2.5:14b", "cn"),
+			]);
+			assert.ok(results.every((route) => route.kind === "local"));
+			assert.equal(calls, 1);
+		} finally {
+			globalThis.fetch = orig;
+		}
+	});
+
+	test("editing localBase voids the cached catalog (old base must not answer for the new one)", async () => {
+		let base = "http://127.0.0.1:11434/v1";
+		let calls = 0;
+		const seenUrls = [];
+		const decider = makeDecider({
+			localBase: () => base,
+			hybridPolicy: () => "by-id",
+		});
+		const orig = globalThis.fetch;
+		globalThis.fetch = async (url) => {
+			calls++;
+			seenUrls.push(String(url));
+			return { ok: true, json: async () => ({ data: [{ id: "qwen2.5:14b" }] }) };
+		};
+		try {
+			assert.equal((await decider("qwen2.5:14b", "cn")).kind, "local");
+			base = "http://127.0.0.1:8000/v1";
+			assert.equal((await decider("qwen2.5:14b", "cn")).kind, "local");
+			assert.equal(calls, 2);
+			assert.deepEqual(seenUrls, [
+				"http://127.0.0.1:11434/v1/models",
+				"http://127.0.0.1:8000/v1/models",
+			]);
+		} finally {
+			globalThis.fetch = orig;
+		}
+	});
+});

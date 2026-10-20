@@ -135,4 +135,24 @@ describe("local.js — forwardToOpenAI", () => {
 			server.close();
 		}
 	});
+
+	test("client abort while the local server never answers → request ends, does not hang", async () => {
+		const server = createServer(() => { /* accept the connection, never respond */ });
+		await new Promise((r) => server.listen(0, "127.0.0.1", r));
+		try {
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 50);
+			const res = mockRes();
+			await forwardToOpenAI(
+				{ kind: "local", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, key: "", model: "m" },
+				{ messages: [] },
+				res,
+				controller.signal,
+			);
+			assert.ok(res.state.ended);
+		} finally {
+			server.closeAllConnections?.();
+			server.close();
+		}
+	});
 });

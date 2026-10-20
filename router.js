@@ -19,10 +19,12 @@
 //                           matches, route local; otherwise fall through to
 //                           Trae. This policy DOES depend on a live local
 //                           server, so the catalog is fetched lazily and
-//                           cached (refreshed per TTL), and a discovery
-//                           failure degrades to "treat as Trae" (never
-//                           "reject the request") so an offline local server
-//                           cannot take down the Trae path.
+//                           cached (refreshed per TTL; failures negative-
+//                           cached for a short cooldown so an offline local
+//                           server cannot stall every request), and a
+//                           discovery failure degrades to "treat as Trae"
+//                           (never "reject the request") so an offline local
+//                           server cannot take down the Trae path.
 //
 // The returned route is a plain discriminated union ({kind:"trae"|"local"}) —
 // this module knows NOTHING about the Trae protocol (that stays in
@@ -40,6 +42,16 @@ const TRAE_AUTO_MODEL = "auto";
 
 /** How long a successful local /v1/models listing stays authoritative. */
 const LOCAL_CATALOG_TTL_MS = 60_000;
+/**
+ * How long a FAILED /v1/models probe is trusted as "still down" before the
+ * next request retries it. Without this negative cache a configured-but-
+ * offline local server re-paid a full 5s probe timeout on EVERY by-id request
+ * (a failure left no cache entry), stalling the very Trae path it is supposed
+ * to fall back to. Failures are cached SHORTER than successes (30s vs 60s) so
+ * a local server that comes back online is picked up quickly; the cost of a
+ * stale "down" verdict is zero — it routes to Trae, the correct fallback.
+ */
+const LOCAL_CATALOG_FAILURE_COOLDOWN_MS = 30_000;
 
 /**
  * Create one routing decision function bound to a config accessor.
@@ -52,17 +64,20 @@ const LOCAL_CATALOG_TTL_MS = 60_000;
  * @returns {(requestedModel: string, edition: "cn"|"intl") => Promise<{kind:"trae", model:string} | {kind:"local", baseUrl:string, key:string, model:string}>}
  */
 export function createRouteDecider({ localBase, localKey, hybridPolicy, logger } = {}) {
-	// Local model-id catalog cache, populated lazily on first "by-id" lookup
-	// and refreshed per TTL. undefined = not fetched yet / last fetch failed.
+	// Local model-id catalog cache, populated lazily on the first "by-id"
+	// lookup. The cached state also carries WHICH baseUrl it was probed from:
+	// a Config-card edit that retargets localBase must void both the success
+	// and the failure verdict, or the old server's answer would be reused for
+	// the new one. undefined = not fetched yet / last fetch failed.
 	let localCatalog = undefined;
+	let localCatalogBase = "";
 	let localCatalogAt = 0;
+	let localCatalogFailedAt = 0;
+	/** In-flight probe promise, shared so concurrent by-id requests fetch once. */
+	let localCatalogInflight;
 
-	/** Fetch (or reuse) the local server's model-id set. Never throws; undefined = unavailable. */
-	async function ensureLocalCatalog() {
-		const baseUrl = String(localBase?.() ?? "").trim().replace(/\/+$/, "");
-		if (baseUrl === "") return undefined;
-		const now = Date.now();
-		if (localCatalog !== undefined && now - localCatalogAt < LOCAL_CATALOG_TTL_MS) return localCatalog;
+	/** One /v1/models probe; updates the cache state. Never throws. */
+	async function probeLocalCatalog(baseUrl) {
 		try {
 			const response = await fetch(`${baseUrl}/models`, {
 				headers: localKey?.()?.trim() ? { Authorization: `Bearer ${localKey().trim()}` } : {},
@@ -76,14 +91,37 @@ export function createRouteDecider({ localBase, localKey, hybridPolicy, logger }
 					.filter((id) => id !== ""),
 			);
 			localCatalog = ids;
-			localCatalogAt = now;
+			localCatalogBase = baseUrl;
+			localCatalogAt = Date.now();
 			return localCatalog;
 		} catch (error) {
+			localCatalogBase = baseUrl;
+			localCatalogFailedAt = Date.now();
 			logger?.warn?.(
-				`dsh-hybrid-connect: 本地模型目录拉取失败（${baseUrl}/models，${String(error?.message ?? error).slice(0, 120)}）— by-id 策略暂按 Trae 兜底`,
+				`dsh-hybrid-connect: 本地模型目录拉取失败（${baseUrl}/models，${String(error?.message ?? error).slice(0, 120)}）— ${Math.round(LOCAL_CATALOG_FAILURE_COOLDOWN_MS / 1000)}s 内不再重试，按 Trae 兜底`,
 			);
 			return undefined;
 		}
+	}
+
+	/** Fetch (or reuse) the local server's model-id set. Never throws; undefined = unavailable. */
+	async function ensureLocalCatalog() {
+		const baseUrl = String(localBase?.() ?? "").trim().replace(/\/+$/, "");
+		if (baseUrl === "") return undefined;
+		const now = Date.now();
+		if (baseUrl !== localCatalogBase) {
+			localCatalog = undefined;
+			localCatalogFailedAt = 0;
+		}
+		if (localCatalog !== undefined && now - localCatalogAt < LOCAL_CATALOG_TTL_MS) return localCatalog;
+		// Failure cooldown: a recently failed probe stays failed until the
+		// cooldown elapses, so an offline local server costs one probe per
+		// window instead of one per request.
+		if (now - localCatalogFailedAt < LOCAL_CATALOG_FAILURE_COOLDOWN_MS) return undefined;
+		localCatalogInflight ??= probeLocalCatalog(baseUrl).finally(() => {
+			localCatalogInflight = undefined;
+		});
+		return localCatalogInflight;
 	}
 
 	/**

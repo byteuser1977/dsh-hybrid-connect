@@ -21,6 +21,17 @@
 
 /** Bounds one local-server response read so a runaway local model cannot pin this process. */
 const LOCAL_BODY_TIMEOUT_MS = 120_000;
+/**
+ * Header deadline for the local fetch. The client abort signal alone cannot
+ * bound a local server that accepts the connection but never answers — with
+ * only that signal the fetch hangs forever (DSH may not abort a hung request
+ * at all), so the headers phase gets its own deadline. It is cleared the
+ * moment headers arrive: a healthy SSE stream may legitimately run longer
+ * than any fixed ceiling, and mid-stream idle behaviour stays the host's
+ * concern (same split as the Trae branch). 300s is generous on purpose — a
+ * cold Ollama / llama.cpp first byte can take minutes on a slow box.
+ */
+const LOCAL_HEADERS_TIMEOUT_MS = 300_000;
 
 function safeMessage(error) {
 	return String(error?.message ?? error).slice(0, 300);
@@ -38,14 +49,33 @@ export async function forwardToOpenAI(route, body, res, signal) {
 	if (key !== "") headers.Authorization = `Bearer ${key}`;
 
 	let response;
+	// Header deadline (LOCAL_HEADERS_TIMEOUT_MS) + client-abort wiring, both
+	// funnelling into one upstream controller. The deadline is cleared as soon
+	// as headers arrive (see the constant's note); the client signal keeps
+	// aborting the upstream through the body phase too, exactly like the old
+	// `signal: signal` wiring did. When no client signal exists (direct
+	// callers), the whole request stays bounded by LOCAL_BODY_TIMEOUT_MS as
+	// before.
+	const upstream = new AbortController();
+	const abortUpstream = () => upstream.abort();
+	const detach = () => {
+		signal?.removeEventListener("abort", abortUpstream);
+		if (bodyDeadline !== undefined) clearTimeout(bodyDeadline);
+	};
+	if (signal?.aborted === true) upstream.abort();
+	signal?.addEventListener("abort", abortUpstream, { once: true });
+	const bodyDeadline = signal === undefined ? setTimeout(abortUpstream, LOCAL_BODY_TIMEOUT_MS) : undefined;
+	const headersDeadline = setTimeout(abortUpstream, LOCAL_HEADERS_TIMEOUT_MS);
 	try {
 		response = await fetch(target, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(payload),
-			signal: signal ?? AbortSignal.timeout(LOCAL_BODY_TIMEOUT_MS),
+			signal: upstream.signal,
 		});
 	} catch (error) {
+		clearTimeout(headersDeadline);
+		detach();
 		// Network-level failure (local server down / unreachable): no headers
 		// written yet, so a normal OpenAI error is safe here.
 		if (!res.headersSent) {
@@ -56,6 +86,7 @@ export async function forwardToOpenAI(route, body, res, signal) {
 		}
 		return;
 	}
+	clearTimeout(headersDeadline);
 
 	if (response.status === 404 && !res.headersSent) {
 		// Distinguish "local server has no such model" from a transient blip so
@@ -107,5 +138,9 @@ export async function forwardToOpenAI(route, body, res, signal) {
 		// Mid-stream failure (local server died between chunks): headers are
 		// already out — end quietly, never attempt a second writeHead.
 		try { res.end(); } catch {}
+	} finally {
+		// Drop the abort wiring on every exit path so a per-request listener
+		// never outlives the request.
+		detach();
 	}
 }

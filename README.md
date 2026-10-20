@@ -68,7 +68,7 @@
 | `by-id` | Model id hits local `/v1/models` catalog → local; miss → Trae | Catalog fetch failure (local server down) **falls back to Trae**, never rejects; `auto` always → Trae |
 
 - No local configured (`localBase` empty) → plugin behaves **identically to pure Trae**, zero overhead.
-- Catalog cache 60s TTL, steady-state zero network calls.
+- Catalog cache 60s TTL, steady-state zero network calls; a failed probe is negative-cached for a 30s cooldown (an offline local server never stalls later requests), concurrent requests share one probe, and editing `localBase` voids the cache immediately.
 
 ---
 

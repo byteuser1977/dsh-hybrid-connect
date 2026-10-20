@@ -31,7 +31,7 @@
 //     passed to the CN status route.
 
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import z from "@deepseek-ai/schemastery";
 import { createProvider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -195,6 +195,20 @@ function hostIsLoopback(host) {
 	return name === "localhost" || name === "127.0.0.1" || name === "::1" || name.startsWith("127.");
 }
 
+/**
+ * Constant-time string equality. Both sides are hashed first so the compare
+ * always runs over equal-length digests — timingSafeEqual throws on length
+ * mismatch, and a raw length check would leak the secret's length. The shim
+ * only binds loopback, but any local process can still reach the port, and a
+ * naive `===` over attacker-controlled bearer strings leaks secret bytes by
+ * timing; the cost here is one sha256 per attempt.
+ */
+function bearerSecretsEqual(attempt, secret) {
+	const da = createHash("sha256").update(attempt).digest();
+	const db = createHash("sha256").update(secret).digest();
+	return timingSafeEqual(da, db);
+}
+
 function originIsLoopback(origin) {
 	if (origin === undefined || origin === "") return true;
 	try {
@@ -292,7 +306,7 @@ function createHybridShim({ stores, routes, logger, preferences, endpointsFor })
 		const header = req.headers.authorization ?? "";
 		const match = /^Bearer\s+(.+)$/.exec(header);
 		if (match === null) return undefined;
-		return Object.entries(EDITION_SECRETS).find(([, secret]) => match[1] === secret)?.[0];
+		return Object.entries(EDITION_SECRETS).find(([, secret]) => bearerSecretsEqual(match[1], secret))?.[0];
 	}
 
 	async function handle(req, res) {
