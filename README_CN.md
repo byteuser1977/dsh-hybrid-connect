@@ -5,7 +5,7 @@
 - ✅ **零配置上手**：装上即用，自动发现已安装 Trae、复用登录态、拉取模型目录
 - ✅ **双版本并行**：`trae`（国内版）+ `trae-intl`（国际版）两组 Provider 无条件注册，凭据缺失自动隐藏
 - ✅ **混合路由**：`by-prefix`（仅 `local@` 前缀走本地，默认零误判） / `by-id`（命中本地目录走本地，失败回退 Trae）
-- ✅ **完整移植**：`install.js` / `upstream.js` / `credentials.js` **逐字节复制**自 `dsh-trae-connect`，协议翻译、凭据解密、令牌续期、安装发现、SSE 去重、即用即焚、1M 上下文、思考强度、锁定标注……全部保留
+- ✅ **完整移植**：`install.js` / `upstream.js` / `credentials.js` 移植自 `dsh-trae-connect`，协议翻译、凭据解密、令牌续期、安装发现、即用即焚、1M 上下文、思考强度、锁定标注……全部保留。`upstream.js` 仅有一处刻意改动（P10 SSE 去重修复，文件内已标注），另外两个文件未做修改
 - ✅ **自足独立**：无外部依赖 `dsh-trae-connect`，单插件即可跑通
 
 ---
@@ -47,15 +47,15 @@
 | 文件 | 行数 | 说明 |
 |---|---|---|
 | `install.js` | 311 | 逐字节移植自 `dsh-trae-connect`；注册表扫描 + product.json 判版本/镜像 |
-| `upstream.js` | 786 | 逐字节移植自 `dsh-trae-connect`；Trae remote SSE 协议客户端 |
-| `credentials.js` | 717 | 逐字节移植自 `dsh-trae-connect`；tc 信封解密 + ExchangeToken 续期 |
-| `router.js` | ~100 | 新增；`by-prefix` / `by-id` 双策略路由决策，目录缓存 + 失败回退 |
-| `local.js` | ~100 | 新增；本地端点 SSE 透传 / JSON 转发，纯转发无副作用 |
-| `index.js` | ~730 | 重写；接线 + 路由插入点 + 2 个 P 项 bug 修复，移植版 `apply()` 骨架 |
+| `upstream.js` | 787 | 移植自 `dsh-trae-connect` + P10 SSE 去重修复；Trae remote SSE 协议客户端 |
+| `credentials.js` | 706 | 逐字节移植自 `dsh-trae-connect`；tc 信封解密 + ExchangeToken 续期 |
+| `router.js` | 161 | 新增；`by-prefix` / `by-id` 双策略路由决策，目录缓存 + 失败回退 |
+| `local.js` | 150 | 新增；本地端点 SSE 透传 / JSON 转发，纯转发无副作用 |
+| `index.js` | 1029 | 重写；接线 + 路由插入点 + P 项 bug 修复，移植版 `apply()` 骨架 |
 | `package.json` | — | **不再依赖 `dsh-trae-connect`** |
 | `README.md` | — | 本文件 |
 
-**移植保真度**：`install.js` / `upstream.js` / `credentials.js` 三个文件**逐字节复制**自 `dsh-trae-connect`（未做任何修改，历史注释和踩坑记录完整保留）；仅在 `index.js` 里做接线。
+**移植保真度**：`install.js` / `credentials.js` 两个文件**逐字节复制**自 `dsh-trae-connect`（历史注释和踩坑记录完整保留）；`upstream.js` 除 P10 SSE 去重修复外与原文一致（改动处文件内已标注）。混合路由的接线只落在 `index.js` / `router.js` / `local.js`。
 
 ---
 
@@ -113,7 +113,7 @@
 2. ~~静态 Bearer → `randomBytes(32)`（P5）~~ ✅ 已落地
 3. ~~SSE 去重逻辑修复（P10，`upstream.js` 的 `plan_item` 分支）~~ ✅ 已落地
 4. 级联回退（形态 C：Trae 502/超时 → 自动重发本地）
-5. `node:test` 单测（`router` / `local` / `upstream.parseModelList` / `credentials.decryptStorageValue` 均为窄接口/纯函数）
+5. `node:test` 单测覆盖（`router` / `local` / `credentials.decryptStorageValue` / `TraeCredentialStore` 已有测试；`upstream.parseModelList` 仍未导出、无测试）
 
 ---
 

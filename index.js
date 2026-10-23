@@ -283,7 +283,7 @@ const UNCONFIGURED_INTL_MODELS = INTL_PLACEHOLDER_MODELS;
  * bearer token (EDITION_SECRETS); the trae/local split is decided per-request
  * by the injected `routes` decider.
  */
-function createHybridShim({ stores, routes, logger, preferences, endpointsFor }) {
+function createHybridShim({ stores, routes, preferences, endpointsFor }) {
 	let address = undefined;
 	let readyResolve;
 	let readyReject;
@@ -559,7 +559,7 @@ function createHybridShim({ stores, routes, logger, preferences, endpointsFor })
 	};
 }
 
-function createTraeAdapter({ shim, store, meta, logger, preferences, endpointsFor }) {
+function createTraeAdapter({ shim, store, meta, preferences, endpointsFor }) {
 	const buildModels = () => {
 		// The WorkBuddy hide mechanism: an edition without a usable credential
 		// publishes an empty catalog — the host filters out groups with no
@@ -773,7 +773,6 @@ export async function apply(ctx, config) {
 	const shim = createHybridShim({
 		stores,
 		routes,
-		logger,
 		preferences,
 		endpointsFor,
 	});
@@ -811,7 +810,6 @@ export async function apply(ctx, config) {
 				shim,
 				store,
 				meta,
-				logger,
 				preferences,
 				endpointsFor,
 			});

@@ -1,5 +1,5 @@
 // tests/local.test.js — unit tests for dsh-hybrid-connect local.js
-// Run: node --test tests/
+// Run: node --test
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -130,6 +130,28 @@ describe("local.js — forwardToOpenAI", () => {
 			const joined = res.state.chunks.join("");
 			assert.ok(joined.includes('data: {"a":1}'));
 			assert.ok(joined.includes("data: [DONE]"));
+			assert.ok(res.state.ended);
+		} finally {
+			server.close();
+		}
+	});
+
+	test("SSE content-type on a non-2xx response keeps the upstream status (not 200)", async () => {
+		const server = createServer((req, res) => {
+			// Some gateways answer errors with the SSE content type.
+			res.writeHead(429, { "Content-Type": "text/event-stream" });
+			res.end('data: {"error":"rate limited"}\n\n');
+		});
+		await new Promise((r) => server.listen(0, "127.0.0.1", r));
+		try {
+			const res = mockRes();
+			await forwardToOpenAI(
+				{ kind: "local", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, key: "", model: "m" },
+				{ stream: true, messages: [] },
+				res,
+				new AbortController().signal,
+			);
+			assert.equal(res.state.status, 429);
 			assert.ok(res.state.ended);
 		} finally {
 			server.close();

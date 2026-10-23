@@ -1,5 +1,5 @@
 // tests/router.test.js — unit tests for dsh-hybrid-connect router.js
-// Run: node --test tests/
+// Run: node --test
 
 import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";

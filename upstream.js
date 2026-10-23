@@ -115,14 +115,6 @@ export function remoteEndpointsFor(edition, overrides = {}) {
 	};
 }
 
-/** Whether the environment overrides came from the process environment. */
-export function environmentOverrides() {
-	return {
-		remoteBase: process.env.TRAE_INTL_REMOTE_BASE ?? "",
-		webOrigin: process.env.TRAE_INTL_WEB_ORIGIN ?? "",
-	};
-}
-
 /**
  * Fallback roster used only when the live catalog cannot be fetched (e.g. no
  * credential yet at startup). The live catalog from
@@ -130,7 +122,7 @@ export function environmentOverrides() {
  * this list as soon as it is available, and is refreshed periodically, so
  * new upstream models appear without a plugin change.
  */
-export const FALLBACK_MODELS = [
+const FALLBACK_MODELS = [
 	{ id: "auto", name: "Trae Auto", contextWindow: 200_000, maxTokens: 64_000 },
 	{ id: "glm-5.3", name: "GLM-5.3", contextWindow: 200_000, maxTokens: 64_000 },
 	{ id: "glm-5.2", name: "GLM-5.2", contextWindow: 200_000, maxTokens: 64_000 },
@@ -358,7 +350,7 @@ export async function refreshModelsIfStale(token, logger, edition = "cn", overri
 		return await refreshModels(token, undefined, edition, overrides);
 	} catch (error) {
 		if (liveFetchedAtByEdition[edition] === 0) {
-			logger?.warn?.(`dsh-trae-connect: live catalog unavailable, serving the fallback roster (${String(error?.message ?? error).slice(0, 160)})`);
+			logger?.warn?.(`dsh-hybrid-connect: live catalog unavailable, serving the fallback roster (${String(error?.message ?? error).slice(0, 160)})`);
 		}
 		return currentModels(edition);
 	}

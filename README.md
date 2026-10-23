@@ -5,7 +5,7 @@
 - ✅ **Zero-config**: Install and go — auto-discovers installed Trae, reuses login state, pulls model catalog
 - ✅ **Dual editions in parallel**: `trae` (CN) + `trae-intl` (Intl) registered unconditionally; groups auto-hide when no credentials
 - ✅ **Hybrid routing**: `by-prefix` (only `local@` prefix goes local, default, zero false positives) / `by-id` (hit local `/v1/models` catalog → local, failure falls back to Trae)
-- ✅ **Full port**: `install.js` / `upstream.js` / `credentials.js` **byte-for-byte copied** from `dsh-trae-connect` — protocol translation, credential decryption, token refresh, install discovery, SSE dedup, ephemeral session cleanup, 1M context, thinking effort, lock badges… all preserved
+- ✅ **Full port**: `install.js` / `upstream.js` / `credentials.js` copied from `dsh-trae-connect` — protocol translation, credential decryption, token refresh, install discovery, ephemeral session cleanup, 1M context, thinking effort, lock badges… preserved. `upstream.js` carries exactly one intentional deviation (the P10 SSE-dedup fix, marked in-file); the other two are unmodified.
 - ✅ **Self-contained**: No external dependency on `dsh-trae-connect`; single plugin runs everything
 
 ---
@@ -40,7 +40,7 @@
 | — | Credential decrypt/refresh | `credentials.js` (**full port**) | ✅ Complete |
 | — | Install location discovery | `install.js` (**full port**) | ✅ Complete |
 
-**Port fidelity**: `install.js` / `upstream.js` / `credentials.js` are **byte-for-byte copies** from `dsh-trae-connect` (historical comments and pitfall notes intact); only `index.js` does the wiring.
+**Port fidelity**: `install.js` / `credentials.js` are **byte-for-byte copies** from `dsh-trae-connect` (historical comments and pitfall notes intact). `upstream.js` is identical except for the P10 SSE-dedup fix, which is called out in-file. Only `index.js` / `router.js` / `local.js` carry the hybrid wiring.
 
 ---
 
@@ -49,11 +49,11 @@
 | File | Lines | Description |
 |------|-------|-------------|
 | `install.js` | 311 | Byte-for-byte port from `dsh-trae-connect`; registry scan + product.json edition/mirror detection |
-| `upstream.js` | 786 | Byte-for-byte port from `dsh-trae-connect`; Trae remote SSE protocol client |
-| `credentials.js` | 717 | Byte-for-byte port from `dsh-trae-connect`; tc envelope decryption + ExchangeToken refresh |
-| `router.js` | ~100 | New; `by-prefix` / `by-id` dual-strategy routing, catalog cache + failure fallback |
-| `local.js` | ~100 | New; local endpoint SSE passthrough / JSON forward, pure proxy no side effects |
-| `index.js` | ~730 | Rewritten; wiring + routing hook + 2 P-bug fixes, ported `apply()` skeleton |
+| `upstream.js` | 787 | Port from `dsh-trae-connect` + P10 SSE-dedup fix; Trae remote SSE protocol client |
+| `credentials.js` | 706 | Byte-for-byte port from `dsh-trae-connect`; tc envelope decryption + ExchangeToken refresh |
+| `router.js` | 161 | New; `by-prefix` / `by-id` dual-strategy routing, catalog cache + failure fallback |
+| `local.js` | 150 | New; local endpoint SSE passthrough / JSON forward, pure proxy no side effects |
+| `index.js` | 1029 | Rewritten; wiring + routing hook + P-bug fixes, ported `apply()` skeleton |
 | `package.json` | — | **No longer depends on `dsh-trae-connect`** |
 | `README.md` | — | This file (English) |
 | `README_CN.md` | — | Chinese version |
@@ -114,7 +114,7 @@ Inherits the two from `dsh-trae-connect` (empty catalog = group hidden):
 2. ~~Static Bearer → `randomBytes(32)` per session (P5)~~ ✅ Landed
 3. ~~SSE dedup logic fix (P10, `upstream.js` `plan_item` branch)~~ ✅ Landed
 4. Cascading fallback (shape C: Trae 502/timeout → auto-retry local)
-5. `node:test` unit tests (`router` / `local` / `upstream.parseModelList` / `credentials.decryptStorageValue` are all narrow interfaces / pure functions)
+5. `node:test` coverage (`router` / `local` / `credentials.decryptStorageValue` / `TraeCredentialStore` are covered; `upstream.parseModelList` is still not exported and untested)
 
 ---
 

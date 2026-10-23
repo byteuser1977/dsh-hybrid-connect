@@ -1,11 +1,15 @@
 // tests/credentials.test.js — unit tests for dsh-hybrid-connect credentials.js
-// Covers decryptStorageValue (tc envelope) and classifyEdition (fallback heuristic).
-// Run: node --test tests/
+// Covers decryptStorageValue (tc envelope), classifyEdition (fallback heuristic)
+// and the TraeCredentialStore sync-discover contract.
+// Run: node --test
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { decryptStorageValue, classifyEdition } from "../credentials.js";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { decryptStorageValue, classifyEdition, TraeCredentialStore } from "../credentials.js";
 
 // --- helpers ---------------------------------------------------------------
 
@@ -98,5 +102,40 @@ describe("credentials.classifyEdition (fallback heuristic)", () => {
 	test("dir name as last resort", () => {
 		assert.equal(classifyEdition("Trae CN", { host: "", userRegion: {} }), "cn");
 		assert.equal(classifyEdition("Trae", { host: "", userRegion: {} }), "intl");
+	});
+});
+
+// --- TraeCredentialStore ---------------------------------------------------
+
+describe("credentials.TraeCredentialStore", () => {
+	test("without an injected discover callback: no credential, nothing persisted", () => {
+		// The desktop discovery callback is SYNCHRONOUS by contract. Its async
+		// default used to hand load() a Promise, which destructured into {} and
+		// persisted an empty credential — this guards against that regression.
+		const dir = mkdtempSync(join(tmpdir(), "dsh-hybrid-"));
+		const path = join(dir, "credentials.json");
+		try {
+			const store = new TraeCredentialStore({ edition: "cn", path });
+			assert.equal(store.load(), undefined);
+			assert.equal(store.current, undefined);
+			assert.equal(existsSync(path), false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("injected synchronous discover is adopted and persisted", () => {
+		const dir = mkdtempSync(join(tmpdir(), "dsh-hybrid-"));
+		const path = join(dir, "credentials.json");
+		try {
+			const auth = { token: "jwt-abc", userId: "u1", host: "https://api.trae.cn" };
+			const store = new TraeCredentialStore({ edition: "cn", path, discover: () => auth });
+			const loaded = store.load();
+			assert.equal(loaded.auth.token, "jwt-abc");
+			assert.equal(loaded.source, "desktop");
+			assert.equal(existsSync(path), true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

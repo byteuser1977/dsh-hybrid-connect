@@ -84,7 +84,7 @@ export function decryptStorageValue(base64Value) {
 	}
 	const random = buffer.subarray(6, 38);
 	const encrypted = buffer.subarray(38);
-	const salt = isPrivate ? xorInto(SALT_A, SALT_B) : xorInto(SALT_A, SALT_B);
+	const salt = xorInto(SALT_A, SALT_B);
 	const hashOfRandom = createHash("sha512").update(random).digest();
 	const finalHash = createHash("sha512").update(Buffer.concat([hashOfRandom, salt])).digest();
 	const key = finalHash.subarray(0, 16);
@@ -162,9 +162,6 @@ export function classifyEdition(dirName, auth) {
 	if (["SG", "US", "JP", "HK", "VA", "GLOBAL", "INTL"].includes(region)) return "intl";
 	return /\bcn\b/i.test(dirName) ? "cn" : "intl";
 }
-
-/** Storage.json's location inside a Trae data directory. */
-const STORAGE_RELATIVE = ["User", "globalStorage", "storage.json"];
 
 /**
  * Data-directory NAMES Trae is known to use, per platform, in probe order.
@@ -401,12 +398,9 @@ function installRootFor(index, edition) {
  *
  * ASYNC: edition resolution consults the installed app (installEditionIndex),
  * which shells out to the Windows uninstall registry on first use, so it
- * cannot be done synchronously. NOTE FOR THE NEXT STEP: index.js calls
- * discoverDesktopAuths() at its startup scan (line ~576) and inside each
- * store's discover callback (line ~627) without awaiting it; both call sites
- * need an `await` (the startup scan sits in an async activate(), the store
- * callback must become async and be awaited inside resolve()). index.js is
- * deliberately NOT touched in this change.
+ * cannot be done synchronously. index.js awaits this function for its startup
+ * scan and inside its credential sweep, and publishes the result through the
+ * store's synchronous `discover` callback (which reads that cache).
  *
  * Returns { results, attempts, appData } where results.cn / results.intl
  * hold the first successful auth per edition ({...auth, _path, _edition})
@@ -456,7 +450,7 @@ export async function discoverDesktopAuths({ logger, explicitCnPath, explicitInt
 		try {
 			entries = readdirSync(base, { withFileTypes: true });
 		} catch (error) {
-			if (!quiet) logger?.warn?.(`dsh-trae-connect: cannot list ${base} while scanning for Trae data directories`, error);
+			if (!quiet) logger?.warn?.(`dsh-hybrid-connect: cannot list ${base} while scanning for Trae data directories`, error);
 			continue;
 		}
 		for (const entry of entries) {
@@ -495,12 +489,12 @@ export async function discoverDesktopAuths({ logger, explicitCnPath, explicitInt
 
 	if (!quiet) {
 		if (attempts.length === 0) {
-			logger?.info?.(`dsh-trae-connect: Trae 目录扫描 — ${bases.join("、") || appData} 下未发现 Trae* 数据目录`);
+			logger?.info?.(`dsh-hybrid-connect: Trae 目录扫描 — ${bases.join("、") || appData} 下未发现 Trae* 数据目录`);
 		} else {
 			const detail = attempts
 				.map((a) => a.ok ? `${a.dir} → ${a.resolved} 凭据可用（${a.storage}）` : `${a.dir} → 无可用凭据`)
 				.join("；");
-			logger?.info?.(`dsh-trae-connect: Trae 目录扫描（${attempts.length} 个候选，${bases.join("、")}）— ${detail}`);
+			logger?.info?.(`dsh-hybrid-connect: Trae 目录扫描（${attempts.length} 个候选，${bases.join("、")}）— ${detail}`);
 			// Which installed app owned each credential, or "未安装/未读到安装" —
 			// the difference between an authoritative and a guessed edition.
 			const decided = attempts
@@ -508,22 +502,12 @@ export async function discoverDesktopAuths({ logger, explicitCnPath, explicitInt
 				.map((a) => `${a.dir} → ${a.installed} 版（${a.installRoot}）`)
 				.join("；");
 			logger?.info?.(
-				`dsh-trae-connect: Trae 版本判定 — ${decided === "" ? "未读到已安装 Trae 的 product.json，版本由凭据域名/目录名推断" : decided}`,
+				`dsh-hybrid-connect: Trae 版本判定 — ${decided === "" ? "未读到已安装 Trae 的 product.json，版本由凭据域名/目录名推断" : decided}`,
 			);
 		}
 	}
 
 	return { results, attempts, appData };
-}
-
-/**
- * Back-compat wrapper: the first usable domestic-edition desktop credential
- * (explicit path overrides the scan). Returns a Promise of
- * {...auth, _path} or undefined — async for the same reason as
- * discoverDesktopAuths.
- */
-export async function readDesktopAuth(explicitPath) {
-	return (await discoverDesktopAuths({ quiet: true, explicitCnPath: explicitPath })).results.cn;
 }
 
 /** Milliseconds until expiry; undefined when the record carries none. */
@@ -546,10 +530,15 @@ export class TraeCredentialStore {
 		this.refreshHost = typeof options.refreshHost === "string" && options.refreshHost.trim() !== ""
 			? options.refreshHost.trim().replace(/\/+$/, "")
 			: undefined;
-		/** Desktop discovery callback: () => {...auth, _path}|undefined. */
-		this.discover = options.discover ?? (this.edition === "cn"
-			? () => readDesktopAuth()
-			: () => undefined);
+		/**
+		 * Desktop discovery callback: SYNCHRONOUS () => {...auth, _path}|undefined.
+		 * There is deliberately no built-in default: discovery is async
+		 * (discoverDesktopAuths consults the installed app), and callers must
+		 * inject an already-awaited record. A default that returned the async
+		 * helper's Promise was destructured into {} and persisted an empty
+		 * credential.
+		 */
+		this.discover = options.discover ?? (() => undefined);
 		this.logger = options.logger;
 		/** @type {{auth: object, source: string}|undefined} */
 		this.current = undefined;
@@ -586,7 +575,7 @@ export class TraeCredentialStore {
 			writeFileSync(temporary, `${JSON.stringify({ version: 1, auth: this.current.auth }, null, 2)}\n`, { mode: 0o600 });
 			renameSync(temporary, this.path);
 		} catch (error) {
-			this.logger?.warn?.("dsh-trae-connect: could not persist the plugin credential copy", error);
+			this.logger?.warn?.("dsh-hybrid-connect: could not persist the plugin credential copy", error);
 		}
 	}
 
@@ -629,7 +618,7 @@ export class TraeCredentialStore {
 	async refresh(auth) {
 		const refreshToken = auth.refreshToken;
 		if (typeof refreshToken !== "string" || refreshToken.length === 0) {
-			this.logger?.warn?.("dsh-trae-connect: token near expiry but no refresh token; keeping the current token");
+			this.logger?.warn?.("dsh-hybrid-connect: token near expiry but no refresh token; keeping the current token");
 			return;
 		}
 		let host;
@@ -645,7 +634,7 @@ export class TraeCredentialStore {
 				? auth.host
 				: undefined) ?? this.refreshHost;
 			if (host === undefined) {
-				this.logger?.warn?.("dsh-trae-connect: 国际版令牌临近过期，但凭据记录未携带鉴权域名；跳过自动续期，沿用当前令牌");
+				this.logger?.warn?.("dsh-hybrid-connect: 国际版令牌临近过期，但凭据记录未携带鉴权域名；跳过自动续期，沿用当前令牌");
 				return;
 			}
 		}
@@ -676,9 +665,9 @@ export class TraeCredentialStore {
 			if (expireRaw !== "") next.expiredAt = String(expireRaw);
 			this.current = { auth: next, source: this.current.source };
 			this.persist();
-			this.logger?.info?.("dsh-trae-connect: Trae token refreshed");
+			this.logger?.info?.("dsh-hybrid-connect: Trae token refreshed");
 		} catch (error) {
-			this.logger?.warn?.("dsh-trae-connect: Trae token refresh failed; keeping the current token", error);
+			this.logger?.warn?.("dsh-hybrid-connect: Trae token refresh failed; keeping the current token", error);
 		}
 	}
 
@@ -711,7 +700,7 @@ export class TraeCredentialStore {
 		try {
 			if (existsSync(this.path)) unlinkSync(this.path);
 		} catch (error) {
-			this.logger?.warn?.("dsh-trae-connect: could not remove the plugin credential copy", error);
+			this.logger?.warn?.("dsh-hybrid-connect: could not remove the plugin credential copy", error);
 		}
 	}
 }

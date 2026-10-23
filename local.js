@@ -60,7 +60,8 @@ export async function forwardToOpenAI(route, body, res, signal) {
 	const abortUpstream = () => upstream.abort();
 	const detach = () => {
 		signal?.removeEventListener("abort", abortUpstream);
-		if (bodyDeadline !== undefined) clearTimeout(bodyDeadline);
+		clearTimeout(headersDeadline);
+		clearTimeout(bodyDeadline);
 	};
 	if (signal?.aborted === true) upstream.abort();
 	signal?.addEventListener("abort", abortUpstream, { once: true });
@@ -74,7 +75,6 @@ export async function forwardToOpenAI(route, body, res, signal) {
 			signal: upstream.signal,
 		});
 	} catch (error) {
-		clearTimeout(headersDeadline);
 		detach();
 		// Network-level failure (local server down / unreachable): no headers
 		// written yet, so a normal OpenAI error is safe here.
@@ -92,6 +92,7 @@ export async function forwardToOpenAI(route, body, res, signal) {
 		// Distinguish "local server has no such model" from a transient blip so
 		// the caller can decide whether to fall back (that fallback lives in
 		// index.js / the caller, not here — this layer never retries).
+		detach();
 		res.writeHead(404, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
 		res.end(JSON.stringify({ error: { message: `local model "${route.model}" not found on ${route.baseUrl}`, type: "model_not_found", code: "model_not_found" } }));
 		return;
@@ -100,10 +101,12 @@ export async function forwardToOpenAI(route, body, res, signal) {
 	const contentType = String(response.headers.get("content-type") ?? "");
 	const isEventStream = contentType.includes("text/event-stream");
 	try {
-		if (isEventStream) {
+		if (isEventStream && response.ok) {
 			// SSE passthrough: relay every byte as it arrives, no re-assembly —
 			// the local server already emits OpenAI-shaped chunks, and
-			// re-parsing would only add latency and a new class of bugs.
+			// re-parsing would only add latency and a new class of bugs. Only a
+			// successful response is relayed as 200: some gateways answer errors
+			// with the SSE content type too, and those must keep their status.
 			res.writeHead(200, {
 				"Content-Type": "text/event-stream",
 				"Cache-Control": "no-cache",
@@ -119,13 +122,14 @@ export async function forwardToOpenAI(route, body, res, signal) {
 					res.write(Buffer.from(value));
 				}
 			} finally {
-				reader.releaseLock().catch?.(() => {});
+				reader.releaseLock();
 			}
 			res.end();
 			return;
 		}
-		// Non-streaming: buffer, then emit once with the local server's own
-		// status + body (local error shapes pass through untouched).
+		// Non-streaming (and non-2xx SSE error responses): buffer, then emit
+		// once with the local server's own status + body (local error shapes
+		// pass through untouched).
 		const text = await response.text();
 		if (!res.headersSent) {
 			res.writeHead(response.status, {
